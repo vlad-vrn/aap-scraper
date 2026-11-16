@@ -1,0 +1,12 @@
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+.claude/
+CLAUDE.md
+# LaTeX build files
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc

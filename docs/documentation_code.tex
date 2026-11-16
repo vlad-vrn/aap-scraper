@@ -1,0 +1,1304 @@
+% Documentation technique du prototype de collecte d'appels à projets (PI2 n°158)
+% Compilation : pdflatex documentation_code.tex (deux fois, pour la table des matières)
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,babel}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------------------------------------------------------------------
+% Couleurs et mise en forme
+% ---------------------------------------------------------------------------
+\definecolor{pbcolor}{RGB}{176,48,32}
+\definecolor{solcolor}{RGB}{30,110,60}
+\definecolor{implcolor}{RGB}{30,70,150}
+\definecolor{codebg}{RGB}{246,246,246}
+\definecolor{codecomment}{RGB}{110,110,110}
+\definecolor{codestring}{RGB}{150,60,20}
+\definecolor{codekeyword}{RGB}{20,60,150}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  keywordstyle=\color{codekeyword}\bfseries,
+  frame=single,
+  rulecolor=\color{black!15},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  numbers=none,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  aboveskip=8pt,
+  belowskip=8pt,
+  literate={é}{{\'e}}1 {è}{{\`e}}1 {ê}{{\^e}}1 {à}{{\`a}}1 {â}{{\^a}}1
+           {ô}{{\^o}}1 {ç}{{\c c}}1 {î}{{\^i}}1 {Î}{{\^I}}1 {û}{{\^u}}1
+           {ù}{{\`u}}1 {É}{{\'E}}1 {’}{{'}}1
+}
+
+% Les trois rubriques de chaque problème
+\newcommand{\pb}{\par\medskip\noindent\textbf{\textcolor{pbcolor}{Problème.}}\ }
+\newcommand{\sol}{\par\medskip\noindent\textbf{\textcolor{solcolor}{Solution retenue.}}\ }
+\newcommand{\impl}{\par\medskip\noindent\textbf{\textcolor{implcolor}{Implémentation.}}\ }
+\newcommand{\limite}{\par\medskip\noindent\textbf{Limite constatée.}\ }
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\setlist{itemsep=2pt,topsep=4pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+\title{Collecte d'appels à projets -- Documentation du code\\[4pt]
+\large Projet PI2 n°158 -- ESILV / DVRC}
+\author{Équipe projet PI2 n°158}
+\date{Novembre 2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\section{Introduction}
+% ===========================================================================
+
+\subsection{Contexte}
+
+Le DVRC compte environ 150 chercheurs. Chaque semaine, des financeurs publient des
+appels à projets (AAP) : l'ANR, Bpifrance, la Commission européenne (Horizon Europe),
+la Région Île-de-France, etc. L'objectif final du projet est d'envoyer à chaque chercheur
+une newsletter ne contenant que les appels qui le concernent, après validation par
+la recherche partenariale.
+
+Le pipeline visé est le suivant :
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, fill=black!4, minimum height=9mm,
+              text width=2.1cm, align=center, font=\small},
+  done/.style={box, fill=green!12, draw=green!50!black},
+  arrow/.style={-{Stealth}, thick}]
+  \node[done] (s) {Scraping\\hebdomadaire};
+  \node[box, right=4mm of s] (db) {Base\\PostgreSQL};
+  \node[box, right=4mm of db] (nlp) {NLP\\(extraction)};
+  \node[box, right=4mm of nlp] (m) {Matching\\(embeddings)};
+  \node[box, right=4mm of m] (e) {Éligibilité};
+  \node[box, right=4mm of e] (n) {Newsletter};
+  \draw[arrow] (s) -- (db);
+  \draw[arrow] (db) -- (nlp);
+  \draw[arrow] (nlp) -- (m);
+  \draw[arrow] (m) -- (e);
+  \draw[arrow] (e) -- (n);
+\end{tikzpicture}
+\end{center}
+
+Le code décrit ici correspond à la première brique (en vert) : un prototype de
+\emph{scraping} qui collecte les appels de quatre sources et les écrit dans un fichier CSV.
+
+\subsection{Comment lire ce document}
+
+Le code est organisé autour d'une série de problèmes concrets (\og comment récupérer
+les dates de chaque appel ? \fg, \og comment lire un PDF scanné ? \fg\dots). Pour chacun,
+le document donne :
+
+\begin{itemize}
+  \item \textbf{\textcolor{pbcolor}{le problème}} : ce qui rend la tâche difficile ;
+  \item \textbf{\textcolor{solcolor}{la solution retenue}} : l'idée, indépendamment du code ;
+  \item \textbf{\textcolor{implcolor}{l'implémentation}} : où et comment elle est codée,
+        avec les extraits utiles.
+\end{itemize}
+
+La section~\ref{sec:transverse} traite les problèmes communs à toutes les sources, les
+sections~\ref{sec:anr} à~\ref{sec:region} les problèmes propres à chaque source.
+La section~\ref{sec:limites} liste les corrections déjà faites et les limites connues.
+
+\subsection{Principes de conception}
+
+Trois principes guident tout le code :
+
+\begin{enumerate}
+  \item \textbf{Un format commun.} Quel que soit le site, chaque appel devient une ligne
+        avec exactement les mêmes colonnes. Ce qu'un site ne donne pas reste vide.
+  \item \textbf{Le scraper collecte, il n'interprète pas.} Les scrapers récupèrent
+        le texte brut (page web, texte des PDF, lignes de dates) et ne remplissent les champs
+        structurés (date limite, statut\dots) que lorsque le site les donne clairement.
+        L'interprétation fine (éligibilité, budget, date limite cachée dans un PDF) est
+        laissée à l'étape NLP (section~\ref{sec:extraction}).
+  \item \textbf{Code lisible par un étudiant.} Pas d'annotations de type, pas de syntaxe
+        compacte, des boucles explicites et une docstring courte par fonction : le projet doit
+        pouvoir être repris par une autre équipe.
+\end{enumerate}
+
+% ===========================================================================
+\section{Vue d'ensemble}
+% ===========================================================================
+
+\subsection{Organisation des fichiers}
+
+\begin{lstlisting}[language={},basicstyle=\ttfamily\scriptsize]
+main.py                 lance les scrapers, écrit le CSV, affiche le taux de remplissage
+config.py               paramètres (délai entre requêtes, dossiers, OCR)
+scrapers/
+  __init__.py           dictionnaire SCRAPERS : nom de source -> fonction scrape()
+  anr.py                HTML : anr.fr/fr/appels + page de chaque appel + PDF
+  bpifrance.py          HTML : bpifrance.fr/nos-appels-a-projets-concours + PDF
+  horizon.py            API publique du portail Funding & Tenders (SEDIA)
+  region_idf.py         open data data.iledefrance.fr (JSON)
+  common.py             lecture d'une page d'appel (texte, lignes de dates, PDF)
+utils/
+  http_client.py        requêtes, délai, robots.txt, gestion d'erreurs
+  html_tools.py         texte principal d'une page, liens PDF, lignes de dates
+  pdf_tools.py          téléchargement PDF, texte (pdfplumber) puis OCR si scanné
+  storage.py            format commun d'une ligne (COLUMNS) + CSV (+ PostgreSQL à venir)
+  report.py             tableau de taux de remplissage par source
+extraction/
+  field_extractor.py    étape suivante : extraction des champs par un modèle QA (BERT)
+\end{lstlisting}
+
+Les fichiers \code{pyproject.toml}, \code{uv.lock} et \code{src/aap\_scraper/} ont été
+générés par l'outil \code{uv} et ne sont pas utilisés par le prototype : les dépendances
+réelles sont listées dans \code{requirements.txt}.
+
+\subsection{Lancer le programme}
+
+Les dépendances sont installées dans l'environnement virtuel \code{.venv}. Il faut donc
+l'activer (ou appeler \code{.venv/bin/python}) avant de lancer les commandes :
+
+Installation (une fois) :
+
+\begin{lstlisting}[language=bash]
+python -m venv .venv
+source .venv/bin/activate                 # Windows : .venv\Scripts\activate
+pip install -r requirements.txt
+# Pour l'OCR, installer aussi Tesseract (avec les langues fra et eng) et Poppler,
+# par exemple sous Arch : pacman -S tesseract tesseract-data-fra tesseract-data-eng poppler
+\end{lstlisting}
+
+Utilisation :
+
+\begin{lstlisting}[language=bash]
+source .venv/bin/activate
+python main.py --max-items 3 --no-pdf     # test rapide, toutes les sources
+python main.py --sources anr horizon      # seulement certaines sources
+python main.py                            # tout, avec les PDF
+python -m scrapers.anr                    # une seule source (idem bpifrance, horizon, region_idf)
+python -m scrapers.region_idf --columns   # colonnes du jeu de données Région
+\end{lstlisting}
+
+Sorties :
+\begin{itemize}
+  \item \code{data/output/aap\_<date>.csv} : une ligne par appel, toutes sources confondues ;
+  \item \code{data/pdfs/<source>/} : les PDF téléchargés et, à côté, leur texte en \code{.txt} ;
+  \item \code{logs/run\_<date>.log} : le journal de l'exécution.
+\end{itemize}
+
+La date des noms de fichiers va jusqu'à la seconde (\code{2026-11-16\_202247}) et est
+calculée une seule fois au début de \code{main()} : le CSV et le log d'une même exécution
+portent le même nom, et deux exécutions rapprochées n'écrasent jamais les fichiers
+l'une de l'autre.
+
+\subsection{Déroulement d'une exécution}
+
+\begin{enumerate}
+  \item \code{main.py} configure les logs et lit les options de la ligne de commande.
+  \item Pour chaque source demandée, il appelle la fonction \code{scrape()} correspondante,
+        trouvée dans le dictionnaire \code{SCRAPERS} de \code{scrapers/\_\_init\_\_.py}.
+  \item Chaque \code{scrape()} renvoie une liste de lignes (des dictionnaires) au format commun.
+  \item \code{main.py} rassemble toutes les lignes, les écrit dans un seul CSV et affiche un
+        tableau du taux de remplissage de chaque colonne par source.
+\end{enumerate}
+
+Toutes les requêtes réseau passent par \code{utils/http\_client.py}, tout le travail sur
+le HTML par \code{utils/html\_tools.py} et tout le travail sur les PDF par
+\code{utils/pdf\_tools.py}. Les scrapers ne contiennent donc que ce qui est propre à
+leur site.
+
+% ===========================================================================
+\section{Le format commun d'un appel}
+% ===========================================================================
+
+\pb Chaque site présente ses appels différemment : une page HTML pour l'ANR, une réponse
+d'API pour Horizon, un fichier JSON pour la Région. Les étapes suivantes (base de données,
+NLP, matching) ne doivent pas dépendre de ces différences.
+
+\sol Définir une fois pour toutes la liste des colonnes d'un appel. Chaque scraper part
+d'une ligne vide contenant toutes ces colonnes et remplit ce qu'il peut.
+
+\impl La liste \code{COLUMNS} et la fonction \code{new\_record()} sont dans
+\code{utils/storage.py} :
+
+\begin{lstlisting}
+def new_record(source):
+    """Create an empty row containing every column, so all sources share the same format."""
+    record = {}
+    for column in COLUMNS:
+        record[column] = ""
+    record["source"] = source
+    record["collected_at"] = datetime.now().isoformat(timespec="seconds")
+    return record
+\end{lstlisting}
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+\textbf{Colonne} & \textbf{Contenu} \\
+\midrule
+\code{source}         & scraper qui a produit la ligne : \code{anr}, \code{bpifrance}, \code{horizon}, \code{region\_idf} \\
+\code{source\_id}     & identifiant de l'appel sur son site (slug d'URL, code de topic, référence\dots) \\
+\code{title}          & titre de l'appel \\
+\code{funder}         & financeur (\og ANR \fg, \og Bpifrance \fg\dots) \\
+\code{call\_type}     & type d'appel tel que donné par la source (\og France 2030 \fg, \og RIA \fg\dots) \\
+\code{status}         & statut tel qu'écrit par la source (ouvert, \emph{forthcoming}, pré-annonce\dots) \\
+\code{opening\_date}  & date d'ouverture au format \code{AAAA-MM-JJ} si elle a pu être lue \\
+\code{deadline}       & date limite au format \code{AAAA-MM-JJ} si elle a pu être lue \\
+\code{dates\_text}    & lignes brutes parlant de dates, gardées telles quelles pour le NLP \\
+\code{summary}        & résumé court \\
+\code{page\_text}     & texte principal de la page (ou description fournie par l'API) \\
+\code{pdf\_urls}      & liens PDF trouvés sur la page, séparés par \og \code{ | } \fg \\
+\code{pdf\_text\_files} & fichiers \code{.txt} locaux contenant le texte extrait des PDF \\
+\code{pdf\_methods}   & méthode de lecture de chaque PDF : \code{text\_layer} ou \code{ocr} \\
+\code{url}            & page de l'appel, pour vérifier à la main \\
+\code{collected\_at}  & date et heure de la collecte \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Une cellule CSV ne contenant qu'une chaîne, les listes (liens PDF, fichiers \code{.txt},
+dates multiples) sont transformées en une seule chaîne par \code{join\_list()}, avec
+\og \code{ | } \fg{} comme séparateur.
+
+% ===========================================================================
+\section{Problèmes communs à toutes les sources}
+\label{sec:transverse}
+% ===========================================================================
+
+\subsection{Interroger les sites sans les surcharger ni enfreindre leurs règles}
+
+\pb Un scraper envoie beaucoup de requêtes à la suite. Sans précaution, il peut surcharger
+un site, ignorer les règles de son fichier \code{robots.txt}, ou s'arrêter à la première
+erreur réseau.
+
+\sol Faire passer \emph{toutes} les requêtes par un seul module qui :
+\begin{itemize}
+  \item attend au moins \code{REQUEST\_DELAY\_SECONDS} (1,5~s) entre deux requêtes ;
+  \item lit le \code{robots.txt} de chaque site (une seule fois par site) et refuse les URL interdites ;
+  \item envoie un \emph{User-Agent} explicite avec un email de contact ;
+  \item transforme toute erreur (réseau, code HTTP différent de 200) en valeur \code{None}
+        accompagnée d'un message dans les logs, au lieu de faire planter le programme.
+\end{itemize}
+
+\impl \code{utils/http\_client.py}. Une session \code{requests} unique est partagée par
+tout le programme (connexions réutilisées, même \emph{User-Agent} partout). Le délai est
+géré par une variable globale qui mémorise l'heure de la dernière requête :
+
+\begin{lstlisting}
+def wait_politely():
+    """Sleep a little so that two requests are never closer than REQUEST_DELAY_SECONDS."""
+    global last_request_time
+    elapsed = time.time() - last_request_time
+    if elapsed < config.REQUEST_DELAY_SECONDS:
+        time.sleep(config.REQUEST_DELAY_SECONDS - elapsed)
+    last_request_time = time.time()
+\end{lstlisting}
+
+Le \code{robots.txt} est téléchargé par \code{load\_robots()} puis analysé avec
+\code{urllib.robotparser} (bibliothèque standard). Le résultat est mis en cache dans le
+dictionnaire \code{robots\_cache}. Si un site n'a pas de \code{robots.txt} (code HTTP
+différent de 200), tout est considéré comme autorisé.
+
+La fonction \code{get()} enchaîne les trois étapes :
+
+\begin{lstlisting}
+def get(url, params=None, check_robots=True):
+    if check_robots and not is_allowed_by_robots(url):
+        log.warning("robots.txt forbids this URL, skipped: %s", url)
+        return None
+    wait_politely()
+    try:
+        response = session.get(url, params=params, timeout=config.REQUEST_TIMEOUT_SECONDS)
+    except requests.RequestException as error:
+        log.warning("Request failed for %s: %s", url, error)
+        return None
+    return check_response(response, url)
+\end{lstlisting}
+
+\code{check\_response()} renvoie la réponse seulement si le code est 200. Un code 403 donne
+un message spécifique (\og access refused, maybe an anti-bot protection \fg) car c'est le
+signe habituel d'une protection anti-robot.
+
+Le paramètre \code{check\_robots=False} n'est utilisé que pour les API et fichiers open data
+officiels, qui sont faits pour être téléchargés. La fonction \code{post()}, utilisée par
+l'API européenne, ne vérifie pas le \code{robots.txt} pour la même raison.
+
+\subsection{Une source en panne ne doit pas bloquer les autres}
+
+\pb Les sites changent sans prévenir. Une erreur imprévue dans un scraper (HTML modifié,
+réponse inattendue) ne doit pas faire perdre les résultats des autres sources.
+
+\sol Lancer chaque scraper dans un bloc \code{try / except} et continuer avec une liste
+vide en cas d'erreur, en gardant la trace complète de l'erreur dans les logs.
+
+\impl Dans \code{main()} :
+
+\begin{lstlisting}
+for name in args.sources:
+    log.info("===== %s =====", name)
+    try:
+        records = SCRAPERS[name](max_items=args.max_items, with_pdfs=not args.no_pdf)
+    except Exception:
+        # One broken source must not stop the others
+        log.exception("The %s scraper crashed, moving on to the next source", name)
+        records = []
+    log.info("%s: %d calls collected", name, len(records))
+    all_records.extend(records)
+\end{lstlisting}
+
+\code{log.exception()} écrit le message \emph{et} la pile d'appels, ce qui permet de
+retrouver la ligne fautive dans \code{logs/}.
+
+\subsection{Extraire le texte utile d'une page web}
+
+\pb Une page HTML contient, en plus du texte de l'appel, des menus, un pied de page, un
+bandeau de cookies, des liens de partage\dots{} Écrire un extracteur par site (en
+s'appuyant sur ses classes CSS) serait long et casserait à chaque refonte du site.
+
+\sol Utiliser \code{trafilatura}, une bibliothèque open source qui repère automatiquement
+le contenu principal de n'importe quelle page. Si elle ne trouve rien, se rabattre sur tout
+le texte visible de la page.
+
+\impl \code{main\_text()} dans \code{utils/html\_tools.py} :
+
+\begin{lstlisting}
+def main_text(html):
+    text = trafilatura.extract(html, include_tables=True, favor_recall=True)
+    if text:
+        return text
+    # Fallback if trafilatura finds nothing: all the visible text of the page
+    return visible_text(parse_html(html))
+\end{lstlisting}
+
+\code{include\_tables=True} garde les tableaux (souvent utilisés pour les calendriers) et
+\code{favor\_recall=True} demande à trafilatura de garder plutôt trop de texte que pas
+assez : il vaut mieux un peu de bruit qu'une information manquante pour l'étape NLP.
+
+Plus généralement, \code{html\_tools.py} évite de dépendre des classes CSS des sites et
+s'appuie sur des éléments stables : balise \code{<h1>}, liens finissant par \code{.pdf},
+mots-clés.
+
+\subsection{Récupérer les dates de chaque appel sur une page HTML}
+\label{sec:dates-html}
+
+\pb Les dates (ouverture, clôture, relève\dots) sont essentielles pour la newsletter, mais
+chaque site les écrit à sa façon et à un endroit différent, souvent dans un encadré
+latéral que l'extracteur de texte principal supprime.
+
+\sol Deux niveaux :
+\begin{enumerate}
+  \item quand la source donne les dates de façon structurée (API Horizon, colonnes de la
+        Région, liste des appels de l'ANR), on les lit directement et on les convertit au
+        format \code{AAAA-MM-JJ} ;
+  \item dans tous les cas, on garde aussi les \emph{lignes brutes} qui parlent de dates,
+        repérées par mots-clés dans \emph{tout} le texte visible de la page. Elles vont
+        dans \code{dates\_text} et serviront à l'étape NLP.
+\end{enumerate}
+
+\impl Les mots-clés sont dans \code{scrapers/common.py} :
+
+\begin{lstlisting}
+DATE_KEYWORDS = ["ouverture", "clôture", "cloture", "fermeture", "limite", "date", "relève", "releve",
+                 "deadline"]
+\end{lstlisting}
+
+La fonction \code{short\_lines\_with\_keywords()} de \code{html\_tools.py} parcourt le texte
+ligne par ligne et garde les lignes \emph{courtes} (200 caractères au plus) qui contiennent
+l'un de ces mots. La limite de longueur évite de récupérer des paragraphes entiers qui
+mentionnent le mot \og date \fg{} par hasard. Les doublons sont ignorés.
+
+Sur beaucoup de pages, le libellé et la valeur sont dans deux éléments HTML différents
+(\og Fermeture : \fg{} puis \og 28/01/2027 à 11:00 CET \fg), donc sur deux lignes du texte.
+Une ligne qui se termine par \og : \fg{} est donc recollée à la ligne suivante, pour garder
+\og Fermeture : 28/01/2027 à 11:00 CET \fg{} et pas un libellé sans valeur.
+
+\begin{lstlisting}
+def short_lines_with_keywords(text, keywords, max_length=200):
+    lines = text.splitlines()
+    found = []
+    for index in range(len(lines)):
+        line = lines[index].strip()
+        if not line or len(line) > max_length:
+            continue
+        if line.endswith(":") and index + 1 < len(lines):
+            line = line + " " + lines[index + 1].strip()
+        lower_line = line.lower()
+        for keyword in keywords:
+            if keyword in lower_line:
+                if line not in found:
+                    found.append(line)
+                break
+    return found
+\end{lstlisting}
+
+Elle est appliquée au texte visible complet (\code{visible\_text()}), et non au texte
+principal de trafilatura, justement parce que les dates sont souvent dans un bloc latéral.
+
+\subsection{Mettre toutes les dates au même format}
+
+\pb Les dates arrivent sous plusieurs formes : \code{16/11/2026} (sites français),
+\code{2026-11-16T17:00:00.000+0000} (API européenne), \code{2026-08-31T22:00:00+00:00}
+(open data Région). Pour trier et filtrer les appels, il faut un format unique.
+
+Piège : une date avec fuseau horaire ne peut pas être coupée telle quelle.
+\code{2026-08-31T22:00:00+00:00} est en temps universel (UTC) ; à Paris, c'est le
+1\textsuperscript{er} septembre à minuit. Garder les dix premiers caractères donnerait
+le 31 août, soit un jour d'écart.
+
+\sol Convertir toutes les dates au format ISO \code{AAAA-MM-JJ}, qui se trie correctement
+comme du texte et que PostgreSQL comprend directement. Une date qui porte un fuseau
+horaire est d'abord convertie à l'heure de Paris (tous les appels collectés sont français
+ou européens).
+
+\impl \code{to\_iso\_date()} dans \code{utils/storage.py} essaie d'abord de lire une
+date-heure complète avec fuseau (\code{to\_paris\_date()}), puis cherche une date
+française avec une expression régulière, puis une date ISO, et renvoie une chaîne vide
+si elle ne trouve rien :
+
+\begin{lstlisting}
+PARIS = ZoneInfo("Europe/Paris")
+
+def to_paris_date(text):
+    """Read a full ISO date-time with a time zone and return its day in Paris ('' if not possible)."""
+    try:
+        moment = datetime.fromisoformat(text.strip())
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        return ""  # no time zone given: to_iso_date() keeps the date as written
+    return moment.astimezone(PARIS).date().isoformat()
+
+DATE_FR = re.compile(r"(\d{2})/(\d{2})/(\d{4})")
+DATE_ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+def to_iso_date(text):
+    if not text:
+        return ""
+    paris_date = to_paris_date(text)
+    if paris_date:
+        return paris_date
+    match = DATE_FR.search(text)
+    if match:
+        day, month, year = match.groups()
+        return year + "-" + month + "-" + day
+    match = DATE_ISO.search(text)
+    if match:
+        return match.group(0)
+    return ""
+\end{lstlisting}
+
+\code{ZoneInfo} vient de la bibliothèque standard (module \code{zoneinfo}) ; sous Windows,
+qui n'a pas de base de fuseaux horaires, il faut le petit paquet \code{tzdata}
+(présent dans \code{requirements.txt}). La fonction \code{today\_iso()} donne la date du
+jour à Paris au même format, pour comparer les dates des appels à aujourd'hui.
+
+\subsection{Trouver les documents PDF d'un appel}
+
+\pb Le texte complet d'un appel (critères d'éligibilité, budget, calendrier détaillé) est
+souvent uniquement dans un PDF : texte de l'appel, cahier des charges, annexes.
+
+\sol Garder tous les liens de la page dont l'adresse contient \code{.pdf}, les rendre
+absolus et supprimer les doublons.
+
+\impl \code{find\_pdf\_links()} dans \code{html\_tools.py}. \code{urljoin()} transforme
+un lien relatif (\code{/medias/aap.pdf}) en adresse complète à partir de l'URL de la page.
+
+Point d'attention dans \code{scrapers/common.py} : les liens PDF sont cherchés
+\emph{avant} l'appel à \code{visible\_text()}, car cette dernière supprime des balises de
+l'objet \code{soup} (\code{script}, \code{style}, \code{noscript}).
+
+\subsection{Lire le texte d'un PDF, y compris s'il est scanné}
+
+\pb Il existe deux sortes de PDF : les PDF \og numériques \fg, qui contiennent le texte, et
+les PDF \og image \fg{} (scans, ou documents dont le texte a été transformé en images), qui ne
+contiennent que des images. Pour les seconds, il faut de la reconnaissance de caractères
+(OCR), qui est lente et demande des logiciels installés sur l'ordinateur.
+
+\sol
+\begin{enumerate}
+  \item Lire la couche texte avec \code{pdfplumber} (rapide et exact).
+  \item Calculer le nombre moyen de caractères par page. S'il est inférieur à
+        \code{OCR\_MIN\_CHARS\_PER\_PAGE} (100), le PDF est considéré comme scanné.
+  \item Seulement dans ce cas, essayer l'OCR avec Tesseract (open source, tourne en local),
+        en français et en anglais.
+  \item Garder le texte le plus long des deux.
+\end{enumerate}
+
+\impl \code{utils/pdf\_tools.py}.
+
+\code{download\_pdf()} enregistre le fichier dans \code{data/pdfs/<source>/}. Si le fichier
+existe déjà (exécution précédente), il n'est pas retéléchargé. Comme certains liens
+\og .pdf \fg{} mènent en réalité à une page HTML, le contenu est vérifié : un vrai PDF
+commence toujours par les octets \code{\%PDF}.
+
+\code{pdf\_to\_text()} applique la stratégie ci-dessus :
+
+\begin{lstlisting}
+chars_per_page = len(text.strip()) / max(nb_pages, 1)
+if chars_per_page >= config.OCR_MIN_CHARS_PER_PAGE:
+    return text, "text_layer"
+
+log.info("Little text found in %s, trying OCR", path)
+ocr_text = extract_text_with_ocr(path)
+if len(ocr_text.strip()) > len(text.strip()):
+    return ocr_text, "ocr"
+return text, "text_layer"
+\end{lstlisting}
+
+L'OCR est indispensable en pratique : les textes des appels France 2030 publiés par l'ANR
+sont des PDF dont le texte a été transformé en images (environ 0 caractère par page pour
+pdfplumber). Il reste toutefois \emph{optionnel} pour le programme :
+\code{extract\_text\_with\_ocr()} importe \code{pytesseract} et \code{pdf2image} à
+l'intérieur de la fonction, dans un \code{try / except ImportError}. Si ces bibliothèques
+(ou les logiciels Tesseract et Poppler) ne sont pas installées, le programme continue avec
+un simple message dans les logs, et le texte de ces PDF reste vide.
+
+\code{process\_pdfs()} traite au plus \code{MAX\_PDFS\_PER\_CALL} (3) PDF par appel : les
+premiers liens d'une page sont en général le texte de l'appel. Le texte de chaque PDF est
+écrit dans un fichier \code{.txt} à côté du PDF, et c'est le chemin de ce fichier qui est
+mis dans le CSV (le texte complet d'un PDF serait trop long pour une cellule).
+
+\subsection{Donner un nom unique à chaque PDF}
+
+\pb Deux appels différents peuvent avoir un PDF portant le même nom
+(\code{annexe.pdf}), et certains noms sont très longs.
+
+\sol Préfixer le nom par une empreinte de l'URL complète et ne garder que la fin du nom
+d'origine, pour rester lisible.
+
+\impl \code{pdf\_file\_name()} : les 10 premiers caractères du hachage MD5 de l'URL, un
+\og \_ \fg, puis les 60 derniers caractères du nom d'origine (avec \code{.pdf} ajouté s'il
+manque). Exemple : \code{2371e5e895\_france2030-aap-labex-2030-2026.pdf}.
+
+\subsection{Enregistrer les résultats dans un format exploitable}
+
+\pb Les résultats doivent pouvoir être ouverts dans Excel par l'encadrant, et plus tard
+chargés dans PostgreSQL.
+
+\sol Un fichier CSV par exécution, encodé en \code{utf-8-sig} : la signature au début du
+fichier indique à Excel qu'il s'agit d'UTF-8, sans quoi les accents s'affichent mal.
+
+\impl \code{save\_to\_csv()} dans \code{utils/storage.py} utilise \code{csv.DictWriter}
+avec la liste \code{COLUMNS} comme en-tête. Excel n'affiche pas plus de 32\,767 caractères
+par cellule : les textes plus longs que \code{MAX\_CELL\_CHARS} (30\,000) sont coupés et
+terminés par \og \code{[...]} \fg. Ce n'est pas une perte, car le texte complet des PDF est
+dans les fichiers \code{.txt}.
+
+\code{save\_to\_postgres()} est un emplacement réservé, qui n'écrit rien pour l'instant. Sa
+docstring propose d'utiliser le couple (\code{source}, \code{source\_id}) comme clé, pour ne
+pas créer de doublons d'une semaine à l'autre.
+
+\subsection{Savoir ce que chaque source fournit vraiment}
+
+\pb Toutes les sources ne donnent pas les mêmes informations. Il faut voir rapidement,
+après chaque exécution, quels champs sont remplis pour quelle source, afin de savoir ce
+que l'étape NLP devra chercher dans les textes.
+
+\sol Afficher à la fin de chaque exécution un tableau : une ligne par source, une colonne
+par champ, avec le pourcentage de lignes où ce champ est rempli.
+
+\impl \code{utils/report.py}. \code{list\_sources()} liste les sources dans l'ordre
+d'apparition, \code{fill\_rate()} calcule le pourcentage de lignes non vides pour une
+colonne, et \code{print\_fill\_report()} affiche le tableau pour les colonnes de
+\code{REPORT\_COLUMNS}. Exemple de sortie :
+
+\begin{lstlisting}[language={}]
+source        rows   title  opening_date  deadline  dates_text  summary ...
+horizon          3    100%          100%      100%        100%       0% ...
+\end{lstlisting}
+
+\subsection{Garder une trace de chaque exécution}
+
+\pb Le scraping sera lancé chaque semaine, souvent sans personne devant l'écran. Il faut
+pouvoir comprendre après coup ce qui s'est passé.
+
+\sol Écrire les messages à la fois dans le terminal et dans un fichier de log daté.
+
+\impl \code{setup\_logging()} dans \code{main.py} crée \code{logs/run\_<date>.log} et
+configure deux sorties (terminal et fichier). Les bibliothèques \code{trafilatura} et
+\code{pdfminer} (utilisée par pdfplumber) étant très bavardes, seuls leurs avertissements
+sont gardés.
+
+\subsection{Modifier les réglages sans toucher au code}
+
+\pb Délai entre requêtes, dossiers de sortie, seuil d'OCR\dots{} sont des valeurs qu'on
+veut pouvoir ajuster sans chercher dans tout le code.
+
+\sol Les regrouper dans un seul fichier.
+
+\impl \code{config.py} : \code{USER\_AGENT}, \code{REQUEST\_DELAY\_SECONDS},
+\code{REQUEST\_TIMEOUT\_SECONDS}, \code{OUTPUT\_DIR}, \code{PDF\_DIR}, \code{LOG\_DIR},
+\code{MAX\_PDFS\_PER\_CALL}, \code{OCR\_MIN\_CHARS\_PER\_PAGE}, \code{OCR\_LANGUAGES}. Avant
+la mise en production, il faut remplacer l'email générique du \code{USER\_AGENT} par
+une vraie adresse de contact.
+
+\subsection{Lire la page de détail d'un appel (sources HTML)}
+
+\pb L'ANR et Bpifrance fonctionnent de la même manière : une page liste les appels, puis
+chaque appel a sa propre page avec le texte complet, les dates et les PDF. Le travail sur
+la page de détail est le même pour les deux sites.
+
+\sol Une fonction commune qui, à partir de l'URL d'un appel, remplit le texte, les lignes
+de dates, les liens PDF et, si demandé, le texte des PDF. Elle renvoie la page analysée,
+pour qu'un scraper puisse y lire des informations propres à son site sans la télécharger
+une seconde fois (c'est ce que fait l'ANR pour son calendrier).
+
+\impl \code{add\_page\_details()} dans \code{scrapers/common.py} :
+
+\begin{lstlisting}
+def add_page_details(record, source, with_pdfs):
+    response = http_client.get(record["url"])
+    if response is None:
+        return None
+
+    soup = html_tools.parse_html(response.text)
+    if not record["title"]:
+        record["title"] = html_tools.page_title(soup)
+
+    # PDF links first (visible_text() below removes some tags from the soup)
+    pdf_urls = html_tools.find_pdf_links(soup, record["url"])
+    record["pdf_urls"] = join_list(pdf_urls)
+
+    record["page_text"] = html_tools.main_text(response.text)
+
+    full_text = html_tools.visible_text(soup)
+    date_lines = html_tools.short_lines_with_keywords(full_text, DATE_KEYWORDS)
+    record["dates_text"] = join_list(date_lines)
+
+    if with_pdfs and pdf_urls:
+        txt_files, methods = pdf_tools.process_pdfs(pdf_urls, source)
+        record["pdf_text_files"] = join_list(txt_files)
+        record["pdf_methods"] = join_list(methods)
+    return soup
+\end{lstlisting}
+
+Si le titre n'a pas été trouvé sur la page de liste, il est pris dans la page de détail
+(\code{page\_title()} : la balise \code{<h1>}, sinon la balise \code{<title>}).
+
+% ===========================================================================
+\section{ANR (Agence nationale de la recherche)}
+\label{sec:anr}
+% ===========================================================================
+
+Fichier : \code{scrapers/anr.py}. Méthode : lecture du HTML. Page de liste :
+\url{https://anr.fr/fr/appels/}.
+
+\subsection{Lister tous les appels en cours et à venir}
+
+\pb Il faut trouver, sur la page de liste, chaque appel et le lien vers sa page.
+
+\sol Sur cette page, tous les appels sont affichés d'un coup (pas de pagination) et chaque
+appel a un titre \code{<h2>} contenant un lien vers une adresse qui contient
+\code{/call/}. Ce motif est stable et ne dépend pas des classes CSS.
+
+\impl \code{get\_call\_cards()} parcourt tous les \code{<h2>} et garde ceux dont le lien
+contient \code{/call/}. Pour chacun, il garde le titre, l'URL absolue et le texte du bloc
+de l'appel (voir ci-dessous).
+
+\subsection{Isoler le bloc HTML d'un seul appel}
+
+\pb Les informations d'un appel (type, période, résumé, mention \og Pré-annonce \fg) sont
+autour de son titre, dans un bloc (\og carte \fg) dont on ne veut pas dépendre de la classe CSS.
+
+\sol Partir du \code{<h2>} et remonter dans l'arbre HTML tant que le bloc parent ne contient
+qu'un seul \code{<h2>}. Dès qu'un parent en contient plusieurs, c'est qu'il regroupe
+plusieurs appels : on s'arrête juste avant.
+
+\impl \code{find\_card\_block()} (4 niveaux au plus, par sécurité) :
+
+\begin{lstlisting}
+def find_card_block(h2):
+    block = h2
+    for _ in range(4):
+        parent = block.parent
+        if parent is None:
+            break
+        if len(parent.find_all("h2")) > 1:
+            break
+        block = parent
+    return block
+\end{lstlisting}
+
+\subsection{Récupérer le type, le statut et le résumé}
+
+\pb Ces informations sont dans le texte de la carte, sans balise dédiée.
+
+\sol Exploiter la mise en page constante des cartes :
+\begin{itemize}
+  \item la première ligne de la carte est le type (\og Appel à projets spécifique \fg, \og France 2030 \fg) ;
+  \item si le texte contient \og pré-annonce \fg, le statut est \og pré-annonce \fg, sinon \og ouvert \fg ;
+  \item le résumé est la ligne la plus longue de la carte, en excluant le titre et le lien
+        \og Plus de détails \fg{} (les autres lignes sont des étiquettes courtes).
+\end{itemize}
+
+\impl \code{card\_to\_record()} et \code{read\_summary()}.
+
+\subsection{Récupérer les dates de chaque appel}
+
+\pb Les dates apparaissent à deux endroits :
+\begin{itemize}
+  \item sur la page de liste, chaque carte affiche une période, soit avec des dates exactes
+        (\og 10/11/2026 - 28/01/2027 \fg), soit avec des mois seulement pour les pré-annonces
+        (\og Décembre 2026 - Février 2027 \fg) ;
+  \item sur la page de l'appel, un calendrier donne chaque étape (\og Ouverture : \fg,
+        \og Fermeture : \fg\dots) avec l'heure.
+\end{itemize}
+Deux pièges : dans le HTML de la carte, les deux dates de la période sont séparées par un
+retour à la ligne (une recherche ligne par ligne ne trouve donc jamais la plage complète),
+et pour une pré-annonce, le calendrier contient une date \emph{estimée} (\og Février 2027 \fg{}
+affiché, mais \code{2027-02-15} dans le code HTML).
+
+\sol
+\begin{enumerate}
+  \item Lire la période dans le bloc de dates de la carte, en remplaçant tous les retours à
+        la ligne par des espaces. Si elle contient deux dates exactes, la première est
+        l'ouverture et la seconde la date limite.
+  \item Sur la page de l'appel, lire le calendrier : chaque étape est un bloc
+        \code{<div class="task">} dont l'attribut \code{data-date} donne la date au format
+        ISO. Ces dates, plus précises, remplacent celles de la liste. On ne garde que les
+        étapes dont le texte affiché est une vraie date \code{jj/mm/aaaa}, pour ne jamais
+        présenter une estimation comme une date exacte.
+  \item Garder dans \code{dates\_text} la période de la liste suivie des lignes de dates de
+        la page, pour l'étape NLP.
+\end{enumerate}
+
+\impl \code{read\_period()} lit le bloc \code{class="date"} de la carte :
+
+\begin{lstlisting}
+def read_period(block):
+    date_block = block.find(class_="date")
+    if date_block is None:
+        return ""
+    words = date_block.get_text(" ").split()
+    return " ".join(words)
+\end{lstlisting}
+
+\code{card\_to\_record()} y cherche ensuite la plage avec l'expression régulière
+\code{DATE\_RANGE}. Le calendrier de la page est lu par \code{read\_calendar()}, qui
+renvoie une liste de couples (libellé, date ISO) :
+
+\begin{lstlisting}
+EXACT_DATE = re.compile(r"\d{2}/\d{2}/\d{4}")
+
+def read_calendar(soup):
+    steps = []
+    for task in soup.find_all("div", class_="task"):
+        if not EXACT_DATE.search(task.get_text(" ")):
+            continue
+        title = task.find(class_="task-title")
+        if title is None:
+            label = ""
+        else:
+            label = title.get_text(" ", strip=True)
+        steps.append((label, task.get("data-date", "")))
+    return steps
+\end{lstlisting}
+
+\code{add\_calendar\_dates()} parcourt ces étapes : la première dont le libellé contient
+un mot de \code{OPENING\_LABELS} (\og ouverture \fg) donne \code{opening\_date}, la
+première dont le libellé contient un mot de \code{DEADLINE\_LABELS} (\og fermeture \fg,
+\og clôture \fg, \og limite \fg) donne \code{deadline}. Pour un appel en deux étapes
+(pré-propositions puis propositions complètes), c'est donc la première date limite qui
+est gardée : c'est celle à ne pas manquer.
+
+Dans \code{scrape()}, la page renvoyée par \code{add\_page\_details()} est réutilisée :
+
+\begin{lstlisting}
+record = card_to_record(card)
+listing_dates = record["dates_text"]
+soup = add_page_details(record, SOURCE, with_pdfs)
+if soup is not None:
+    add_calendar_dates(record, soup)
+# Keep the period of the listing in front of the detailed date lines
+if listing_dates:
+    record["dates_text"] = listing_dates + " | " + record["dates_text"]
+\end{lstlisting}
+
+Résultat au 16/11/2026 : 18 appels sur 24 ont des dates exactes ; les 6 autres sont des
+pré-annonces, qui n'affichent que des mois (gardés dans \code{dates\_text}).
+
+\subsection{Identifier un appel de façon stable}
+
+\pb Il faut un identifiant pour reconnaître le même appel d'une semaine à l'autre.
+
+\sol Le dernier segment de l'URL (le \emph{slug}) est unique et stable.
+
+\impl \code{record["source\_id"] = card["url"].rstrip("/").split("/")[-1]}.
+
+\subsection{Texte complet et PDF}
+
+Gérés par \code{add\_page\_details()} (section~\ref{sec:transverse}). Les PDF de l'ANR
+sont le texte de l'appel, les annexes, les FAQ et les supports de webinaire.
+
+% ===========================================================================
+\section{Bpifrance}
+\label{sec:bpifrance}
+% ===========================================================================
+
+Fichier : \code{scrapers/bpifrance.py}. Méthode : lecture du HTML (Bpifrance n'a pas
+d'API). Page de liste : \url{https://www.bpifrance.fr/nos-appels-a-projets-concours}.
+
+\subsection{Lister les appels répartis sur plusieurs pages}
+
+\pb La liste est découpée en pages (\code{?page=0}, \code{?page=1}\dots) et on ne connaît
+pas le nombre de pages à l'avance.
+
+\sol Lire les pages une par une et s'arrêter dès qu'une page n'apporte aucun nouveau lien
+d'appel. Une limite de 15 pages (\code{MAX\_LIST\_PAGES}) évite une boucle infinie si la
+pagination ne s'arrête jamais.
+
+\impl \code{collect\_call\_links()}. Un lien est retenu s'il contient
+\code{/nos-appels-a-projets-concours/} et n'est pas la page de liste elle-même.
+\code{clean\_url()} rend le lien absolu et supprime ce qui suit \code{?} ou \code{\#}, pour
+que le même appel ne soit pas compté deux fois. La boucle s'arrête aussi dès que
+\code{max\_items} liens ont été trouvés.
+
+\subsection{Remplir les champs de chaque appel}
+
+\pb Bpifrance opère surtout des appels pour le compte de l'État (France 2030\dots) et
+n'affiche pas le type ni le statut de façon uniforme.
+
+\sol Ne remplir que ce qui est fiable (financeur, URL, identifiant, titre), et laisser
+type et statut vides : ils seront trouvés par l'étape d'extraction.
+
+\impl Dans \code{scrape()}, \code{source\_id} est la fin de l'URL. Tout le reste (titre
+depuis le \code{<h1>}, texte, lignes de dates, PDF des cahiers des charges) vient de
+\code{add\_page\_details()}.
+
+\subsection{Détecter un refus d'accès}
+
+\pb Le site peut refuser les robots (protection anti-bot).
+
+\sol Ne pas tenter de contourner la protection, mais le signaler clairement.
+
+\impl Le code HTTP 403 est détecté par \code{check\_response()} dans \code{http\_client.py},
+qui écrit un message explicite. \code{collect\_call\_links()} s'arrête alors et le scraper
+renvoie une liste vide. Les conditions générales d'utilisation du site doivent aussi être
+vérifiées à la main avant une utilisation hebdomadaire.
+
+\limite C'est ce qui se produit actuellement : tout le site, \code{robots.txt} compris,
+renvoie une erreur 403 générée par le CDN CloudFront, avant même d'atteindre le site.
+Contourner cette protection (par exemple en se faisant passer pour un navigateur) serait
+contraire aux règles du projet. Les pistes sont de demander une autorisation à Bpifrance
+ou de trouver une source qui reprend ses appels. Voir section~\ref{sec:limites}.
+
+% ===========================================================================
+\section{Horizon Europe}
+\label{sec:horizon}
+% ===========================================================================
+
+Fichier : \code{scrapers/horizon.py}. Méthode : API publique du portail
+\emph{EU Funding \& Tenders}.
+
+\subsection{Récupérer les données d'un site entièrement en JavaScript}
+
+\pb Le portail européen est une application JavaScript : le HTML téléchargé ne contient
+pas les appels, ils sont chargés ensuite par le navigateur.
+
+\sol Interroger directement l'API de recherche publique que le portail utilise lui-même.
+Elle ne demande pas de compte : la clé \code{apiKey=SEDIA} est la clé publique du portail.
+
+\impl \code{fetch\_page()}. L'API attend une requête POST où les filtres sont envoyés comme
+des \og fichiers \fg{} JSON (format \emph{multipart}), d'où l'usage du paramètre
+\code{files} de \code{requests} :
+
+\begin{lstlisting}
+params = {"apiKey": "SEDIA", "text": "***", "pageSize": PAGE_SIZE, "pageNumber": page_number}
+files = {
+    "query": ("blob", json.dumps(build_query()), "application/json"),
+    "languages": ("blob", json.dumps(["en"]), "application/json"),
+    "sort": ("blob", json.dumps({"order": "ASC", "field": "identifier"}), "application/json"),
+}
+response = http_client.post(API_URL, params=params, files=files)
+\end{lstlisting}
+
+\subsection{Ne garder que les appels Horizon Europe ouverts ou à venir}
+
+\pb Le portail contient tous les programmes européens et tous les appels, y compris clos.
+
+\sol Filtrer dans la requête avec les codes numériques du portail (peu documentés,
+retrouvés en observant les requêtes du site) :
+\begin{itemize}
+  \item \code{frameworkProgramme} = \code{43108390} : Horizon Europe ;
+  \item \code{status} = \code{31094501} (\emph{forthcoming}) ou \code{31094502} (\emph{open}) ;
+  \item \code{type} = \code{1} ou \code{2} : topics et appels de subventions.
+\end{itemize}
+
+\impl \code{build\_query()} renvoie un filtre de type Elasticsearch (\code{bool} /
+\code{must} / \code{terms}) contenant ces trois conditions.
+
+\subsection{Écarter les entrées périmées de l'index}
+
+\pb L'index de l'API contient des entrées anciennes (indexées en 2022--2023 et jamais mises
+à jour) qui ont toujours le statut \emph{open} ou \emph{forthcoming} alors que toutes leurs
+dates limites sont passées. Au 16/11/2026, c'était le cas de 458 topics sur 787. Ce sont
+aussi celles qui n'ont pas de description. Un filtre sur la date ajouté à la requête est
+ignoré par l'API.
+
+\sol Faire le tri nous-mêmes : un topic dont la dernière date limite est passée est ignoré.
+Un topic sans date limite est gardé (l'étape NLP lira son texte).
+
+\impl \code{is\_outdated()}, appelée dans \code{scrape()} pour chaque résultat. Le nombre de
+topics écartés est écrit dans les logs. Les dates étant des chaînes \code{AAAA-MM-JJ},
+elles se comparent directement avec \code{today\_iso()} :
+
+\begin{lstlisting}
+def is_outdated(record):
+    """Tell if a topic is an old entry of the index: its (last) deadline is already past."""
+    if not record["deadline"]:
+        return False  # no deadline given: we keep it, the NLP step will look at the text
+    return record["deadline"] < today_iso()
+\end{lstlisting}
+
+\subsection{Parcourir toutes les pages de résultats sans en perdre}
+
+\pb L'API renvoie les résultats par pages de 50. Si l'ordre des résultats n'est pas
+strictement défini, il peut changer d'une page à l'autre : c'était le cas avec un tri par
+date limite, car beaucoup de topics ont la même date. Résultat observé : 787 topics
+annoncés, mais seulement 771 différents reçus, certains en double et d'autres jamais.
+
+\sol Trier sur un champ unique, l'identifiant du topic, puis demander les pages une par une
+jusqu'à recevoir une page incomplète (moins de 50 résultats), avec une limite de sécurité
+de 40 pages (2\,000 topics).
+
+\impl Champ \code{sort} de \code{fetch\_page()} et boucle \code{while} dans
+\code{scrape()}. Le nombre total annoncé par l'API est affiché dans les logs à la première
+page. Si \code{max\_items} est atteint, la fonction s'arrête immédiatement.
+
+\subsection{Éviter les doublons}
+
+\pb Par sécurité, on veut être sûr de ne jamais avoir deux fois le même topic.
+
+\sol Mémoriser les identifiants déjà vus et ignorer les répétitions.
+
+\impl Liste \code{seen\_ids} dans \code{scrape()} ; les résultats sans identifiant sont
+aussi ignorés.
+
+\subsection{Transformer un résultat de l'API en ligne du format commun}
+
+\pb Dans la réponse de l'API, chaque champ est une liste (\code{"title": ["..."]}), même
+quand il n'a qu'une valeur, et les statuts sont des codes numériques.
+
+\sol Une petite fonction qui renvoie le premier élément de la liste (ou une chaîne vide),
+et un dictionnaire de correspondance pour les statuts.
+
+\impl \code{first\_value()} et \code{result\_to\_record()} :
+\begin{itemize}
+  \item \code{status} : traduit par \code{STATUS\_LABELS} (\emph{forthcoming}, \emph{open},
+        \emph{closed}), ou code brut si inconnu ;
+  \item \code{call\_type} : champ \code{typesOfAction} (ex. \og HORIZON Research and Innovation
+        Actions \fg), avec les espaces doublés supprimés ;
+  \item \code{opening\_date} : champ \code{startDate} ;
+  \item \code{deadline} : certains topics ont plusieurs dates limites (topics en deux étapes,
+        dates de relève de l'EIC). Elles sont triées, \code{next\_deadline()} garde la
+        prochaine date qui n'est pas encore passée (ou la dernière si toutes le sont), et
+        toutes sont listées dans \code{dates\_text} ;
+  \item \code{summary} : titre et identifiant de l'appel parent (\code{callTitle},
+        \code{callIdentifier}) ;
+  \item \code{page\_text} : la description du topic (\code{descriptionByte}, en HTML),
+        convertie en texte par \code{html\_to\_text()} ;
+  \item \code{url} : construite à partir de l'identifiant du topic, vers la page publique du portail.
+\end{itemize}
+
+\subsection{Pourquoi pas de PDF pour cette source}
+
+La description du topic est déjà dans la réponse de l'API. Les PDF associés sont les
+\emph{work programmes}, des documents de plusieurs centaines de pages communs à des
+centaines de topics : les télécharger n'apporterait presque rien. Le paramètre
+\code{with\_pdfs} est accepté pour garder la même signature que les autres scrapers,
+mais il n'est pas utilisé.
+
+% ===========================================================================
+\section{Région Île-de-France}
+\label{sec:region}
+% ===========================================================================
+
+Fichier : \code{scrapers/region\_idf.py}. Méthode : jeu de données open data
+\og Aides et appels à projets de la Région \fg{} (celui qui alimente
+\url{https://www.iledefrance.fr/aides-et-appels-a-projets}).
+
+\subsection{Récupérer toutes les aides sans scraper le site}
+
+\pb Le site de la Région est construit à partir d'une base de données. Scraper ses pages
+serait plus lent et plus fragile que lire la base directement.
+
+\sol Télécharger en une seule requête le jeu de données complet au format JSON depuis le
+portail open data (Opendatasoft). En cas d'échec, utiliser la copie publiée sur
+data.gouv.fr.
+
+\impl \code{download\_rows()} essaie les deux URL (\code{DATA\_URL} puis
+\code{BACKUP\_DATA\_URL}) et renvoie la première liste valide. Le \code{robots.txt} n'est
+pas vérifié (\code{check\_robots=False}) car il s'agit d'un fichier open data fait pour être
+téléchargé.
+
+\subsection{Trouver les bonnes colonnes}
+
+\pb Les noms des colonnes du jeu de données sont peu documentés, et deux colonnes peuvent
+porter la même information (\code{titre\_alternatif\_de\_l\_aide}, rempli pour 144 aides
+seulement, et \code{nom\_de\_l\_aide\_de\_la\_demarche}, toujours rempli mais souvent en
+majuscules).
+
+\sol Relever une fois les vrais noms de colonnes et les écrire en constantes en haut du
+fichier. Quand plusieurs colonnes peuvent donner un champ, les essayer dans l'ordre de
+préférence et garder la première non vide. Une commande affiche les colonnes du jeu de
+données, pour mettre à jour les constantes si la Région les renomme.
+
+\impl Constantes \code{ID\_COLUMN}, \code{TITLE\_COLUMNS}, \code{SUMMARY\_COLUMNS},
+\code{OPENING\_COLUMN}, \code{DEADLINE\_COLUMN}, \code{NEXT\_CAMPAIGN\_COLUMN},
+\code{URL\_COLUMN} (vérifiées le 16/11/2026), et la fonction :
+
+\begin{lstlisting}
+def first_filled(row, columns):
+    """Return the value of the first of these columns that is not empty ('' if none)."""
+    for column_name in columns:
+        value = to_text(row.get(column_name))
+        if value:
+            return value
+    return ""
+\end{lstlisting}
+
+\code{python -m scrapers.region\_idf -{}-columns} appelle \code{print\_columns()}, qui affiche
+le nom de chaque colonne avec le début de sa valeur pour la première aide.
+
+\subsection{Gérer des valeurs de types variés}
+
+\pb Selon la colonne, une valeur peut être du texte, un nombre, une liste ou \code{None}.
+
+\sol Tout convertir en texte simple avant usage.
+
+\impl \code{to\_text()} : \code{None} devient \code{""}, une liste devient ses éléments
+séparés par des virgules, le reste passe par \code{str()}. Les colonnes contenant du HTML
+(titre, résumé) sont nettoyées par \code{html\_to\_text()}.
+
+\subsection{Récupérer les dates}
+
+\pb Les dates (\code{date\_ouverture}, \code{date\_cloture}) sont en temps universel :
+\code{2026-08-31T22:00:00+00:00} correspond au 1\textsuperscript{er} septembre à minuit à
+Paris. Une troisième colonne, \code{datedebutfuturcampagne}, annonce parfois la prochaine
+campagne d'une aide.
+
+\sol Convertir les dates à l'heure de Paris (c'est ce que fait \code{to\_iso\_date()},
+voir section~\ref{sec:transverse}). La date de prochaine campagne n'est ni une ouverture
+ni une clôture : elle est seulement ajoutée à \code{dates\_text}.
+
+\impl Dans \code{row\_to\_record()} : \code{opening\_date} et \code{deadline} sont remplies
+avec \code{to\_iso\_date()}, et \code{dates\_text} contient par exemple
+\og \code{ouverture: 2026-09-01 | clôture: 2027-06-30 | prochaine campagne: 2027-03-03} \fg.
+
+\subsection{Donner un statut à chaque aide}
+
+\pb Le jeu de données n'a aucune colonne de statut, et il contient aussi les aides closes
+(146 sur 357 au 16/11/2026).
+
+\sol Calculer le statut à partir des dates et de la date du jour. Les aides closes sont
+gardées, avec le statut \og clos \fg, pour que le choix de les ignorer reste visible et se
+fasse à l'étape suivante.
+
+\impl \code{compute\_status()} :
+
+\begin{lstlisting}
+def compute_status(opening_date, deadline):
+    today = today_iso()
+    if deadline and deadline < today:
+        return "clos"
+    if opening_date and opening_date > today:
+        return "à venir"
+    if opening_date or deadline:
+        return "ouvert"
+    return "sans date"
+\end{lstlisting}
+
+Il n'y a pas non plus de colonne de type d'appel, et les titres ne permettent pas de le
+deviner de façon fiable (près de 90~\% ne contiennent ni \og appel à projets \fg, ni
+\og AMI \fg, ni mot équivalent) : \code{call\_type} reste vide pour cette source.
+
+\subsection{Conserver toute l'information utile pour l'étape NLP}
+
+\pb Les informations utiles (publics éligibles, objectifs, modalités) sont réparties sur
+une trentaine de colonnes. Beaucoup existent en deux versions (\code{objectif} en HTML et
+\code{objectif\_txt} en texte), et certaines sont purement techniques (identifiants,
+codes de thèmes, SIREN\dots).
+
+\sol Rassembler dans \code{page\_text} les colonnes utiles non vides, sous la forme
+\og nom\_de\_colonne : valeur \fg, une par ligne, sans les doublons ni les colonnes
+techniques.
+
+\impl \code{row\_to\_full\_text()} saute les colonnes de \code{TECHNICAL\_COLUMNS} et toute
+colonne \code{X} pour laquelle une colonne \code{X\_txt} existe.
+
+\subsection{Récupérer les documents PDF de chaque aide}
+
+\pb Les documents d'une aide ne sont pas dans le même jeu de données, et ce ne sont pas
+tous des PDF (Word, Excel, archives ZIP\dots).
+
+\sol Télécharger le second jeu de données, \code{documents-publics-des-aides-regionales},
+et le relier aux aides par la référence administrative. Ne garder que les PDF, en mettant
+les \og documents d'information \fg{} avant les \og documents nécessaires \fg{} (surtout des
+formulaires à remplir), car seuls les premiers PDF d'un appel sont lus
+(\code{MAX\_PDFS\_PER\_CALL}).
+
+\impl \code{download\_pdf\_links()} renvoie un dictionnaire
+\{référence administrative : liste d'URL de PDF\}. Dans \code{scrape()}, ces URL vont dans
+\code{pdf\_urls} et, si \code{with\_pdfs} est vrai, sont traitées par
+\code{pdf\_tools.process\_pdfs()} comme pour les autres sources. Au 16/11/2026, 226 aides
+sur 357 ont au moins un PDF.
+
+\subsection{Pas de filtrage par thème à la collecte}
+
+Le jeu de données contient \emph{toutes} les aides de la Région (sport, culture,
+entreprises\dots), pas seulement celles qui concernent la recherche. Le choix fait est de
+tout collecter : trier par pertinence est le rôle de l'étape de matching, pas du scraper.
+
+% ===========================================================================
+\section{Étape suivante : extraction des champs}
+\label{sec:extraction}
+% ===========================================================================
+
+Fichier : \code{extraction/field\_extractor.py} (pas encore branché sur \code{main.py}).
+
+\pb Beaucoup de champs importants (date limite, éligibilité, budget, dépenses financées)
+sont écrits différemment sur chaque site, souvent seulement dans le PDF. Écrire une
+expression régulière par site et par champ ne passe pas à l'échelle.
+
+\sol Utiliser un modèle open source de \emph{question-answering} extractif de type BERT,
+qui tourne sur le processeur d'un ordinateur portable. On lui pose une question
+(\og Quelle est la date limite de dépôt ? \fg) sur un texte, et il renvoie le passage qui
+répond, avec un score de confiance. Les réponses à faible score partent en validation humaine.
+
+Modèles candidats (Hugging Face) :
+\begin{itemize}
+  \item \code{etalab-ia/camembert-base-squadFR-fquad-piaf} (français) ;
+  \item \code{deepset/xlm-roberta-base-squad2} (multilingue, utile pour Horizon en anglais).
+\end{itemize}
+
+\impl Déjà en place :
+\begin{itemize}
+  \item \code{QUESTIONS} : une question par champ à extraire ;
+  \item \code{load\_call\_text()} : rassemble le texte de la page et le texte de chaque PDF
+        (fichiers \code{.txt}) d'un appel ;
+  \item \code{split\_into\_chunks()} : découpe le texte en morceaux d'environ 350 mots, car
+        ces modèles lisent au plus 512 \emph{tokens} à la fois ;
+  \item \code{extract\_fields()} : renvoie pour l'instant des valeurs vides.
+\end{itemize}
+
+Reste à faire : poser chaque question sur chaque morceau, garder la réponse de meilleur
+score, et stocker la réponse avec son score. Cela demandera les dépendances
+\code{transformers} et \code{torch}.
+
+% ===========================================================================
+\section{Ajouter une nouvelle source}
+% ===========================================================================
+
+\begin{enumerate}
+  \item Créer \code{scrapers/<nom>.py} avec une fonction
+        \code{scrape(max\_items=None, with\_pdfs=True)} qui renvoie une liste de lignes créées
+        avec \code{new\_record(SOURCE)}.
+  \item Toutes les requêtes doivent passer par \code{utils/http\_client.py} (délai et
+        \code{robots.txt} gérés automatiquement).
+  \item Si la source a une page par appel, réutiliser \code{add\_page\_details()} de
+        \code{scrapers/common.py}.
+  \item Ajouter une ligne dans le dictionnaire \code{SCRAPERS} de \code{scrapers/\_\_init\_\_.py}.
+  \item Ajouter en bas du fichier un bloc \code{if \_\_name\_\_ == "\_\_main\_\_":} pour pouvoir
+        tester la source seule avec \code{python -m scrapers.<nom>}.
+  \item Lancer \code{python main.py -{}-sources <nom> -{}-max-items 3 -{}-no-pdf} et regarder le
+        tableau de remplissage.
+\end{enumerate}
+
+Ordre de préférence pour une nouvelle source : API ou open data officiel, puis HTML. Une
+API est plus stable, plus rapide et plus respectueuse du site.
+
+% ===========================================================================
+\section{Limites connues et corrections}
+\label{sec:limites}
+% ===========================================================================
+
+\subsection{Corrections apportées le 16/11/2026}
+
+Un premier test de chaque source (\code{-{}-max-items 3 -{}-no-pdf}) a mis en évidence les
+problèmes suivants, tous corrigés et décrits dans les sections précédentes.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l X X@{}}
+\toprule
+\textbf{Source} & \textbf{Problème constaté} & \textbf{Correction} \\
+\midrule
+Toutes &
+Fichiers datés à la minute : deux exécutions dans la même minute écrivaient le même CSV. &
+Date à la seconde, commune au CSV et au log. \\
+\addlinespace
+ANR &
+0~\% de dates converties : période coupée sur deux lignes ; \og Fermeture \fg{} absent des
+mots-clés ; libellés séparés de leur valeur. &
+Lecture du bloc de dates de la carte, puis du calendrier de la page (\code{data-date}) ;
+mot-clé ajouté ; libellé recollé à sa valeur. 18 appels sur 24 ont des dates exactes. \\
+\addlinespace
+ANR &
+Textes des appels France 2030 vides (PDF en images, OCR non installé). &
+OCR ajouté aux dépendances. \\
+\addlinespace
+Horizon &
+458 topics sur 787 périmés mais marqués ouverts ou à venir. &
+Topics dont la dernière date limite est passée ignorés. \\
+\addlinespace
+Horizon &
+Pagination instable : 771 topics différents reçus sur 787. &
+Tri par identifiant : 787 sur 787. \\
+\addlinespace
+Région &
+Dates en UTC enregistrées avec un jour de retard ; statut toujours vide ; texte en double ;
+pas de PDF. &
+Conversion à l'heure de Paris ; statut calculé ; colonnes en double et techniques retirées ;
+PDF reliés depuis le second jeu de données. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Limites restantes}
+
+\begin{itemize}
+  \item \textbf{Bpifrance} : le site renvoie une erreur 403 (protection CloudFront) pour
+        toutes les URL, \code{robots.txt} compris. Aucun appel n'est collecté. Ne pas
+        contourner la protection ; demander une autorisation ou trouver une source
+        alternative.
+  \item \textbf{ANR, pré-annonces} : seules des périodes en mois sont publiées ; les champs
+        \code{opening\_date} et \code{deadline} restent vides et l'information est dans
+        \code{dates\_text}.
+  \item \textbf{ANR, sélecteurs CSS} : la lecture des dates repose sur les classes
+        \code{date} et \code{task} du site. Si l'ANR refond son site, ces champs se
+        videront ; le tableau de remplissage affiché à la fin de chaque exécution permet de
+        le voir tout de suite.
+  \item \textbf{Région} : pas de type d'appel ; le jeu de données contient toutes les aides
+        de la Région, y compris closes (statut \og clos \fg).
+  \item \textbf{Horizon} : quelques topics à venir n'ont pas encore de description
+        (environ 1~\%).
+  \item \textbf{OCR} : il faut installer Tesseract et Poppler sur chaque machine, en plus
+        des paquets Python.
+  \item \textbf{User-Agent} : l'email de contact de \code{config.py} est encore générique
+        et doit être remplacé avant une utilisation régulière.
+\end{itemize}
+
+\end{document}
